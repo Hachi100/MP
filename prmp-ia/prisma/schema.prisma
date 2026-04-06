@@ -1,0 +1,448 @@
+// Schéma Prisma — PRMP-IA
+// Outil interne de gestion des marchés publics au Bénin
+// Cadre juridique : Loi N°2020-26, Décrets 2020-595 à 2020-605
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── RBAC simplifié : 3 rôles ───
+
+enum Role {
+  ADMIN
+  PRMP
+  SPMP
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  nom           String
+  prenom        String
+  passwordHash  String
+  role          Role      @default(SPMP)
+  actif         Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  sessions      Session[]
+  auditLogs     AuditLog[]
+
+  @@map("users")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+// ─── Audit trail immuable ───
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String
+  action     String   // CREATE, UPDATE, DELETE, EXPORT, VALIDATE...
+  entite     String   // Nom du modèle concerné
+  entiteId   String   // ID de l'entité concernée
+  donnees    Json?    // Snapshot des données avant/après
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id])
+
+  // Pas de DELETE ni UPDATE — append-only
+  @@map("audit_logs")
+}
+
+// ─── Module 1 : PPM ───
+
+enum StatutPPM {
+  BROUILLON
+  TRANSMIS
+  VALIDE
+  REVISE
+}
+
+enum TypeMarche {
+  TRAVAUX
+  FOURNITURES
+  SERVICES
+  PI_CABINET
+  PI_INDIVIDUEL
+}
+
+enum ModePassation {
+  AOO    // Appel d'Offres Ouvert
+  AOR    // Appel d'Offres Restreint
+  DRP    // Demande de Renseignements et de Prix
+  DC     // Demande de Cotation
+  DISPENSE
+  AMI    // Appel à Manifestation d'Intérêt
+  AMII   // AMI International
+  MED    // Marché d'Entente Directe
+}
+
+enum MethodeSelectionPI {
+  SFQC   // Sélection Fondée sur la Qualité et le Coût
+  SPBP   // Sélection au Plus Bas Prix
+  SFBD   // Sélection dans un Budget Déterminé
+  QT     // Qualification Technique
+  CI     // Consultant Individuel
+  DP     // Demande de Propositions
+}
+
+enum OrganeControle {
+  CCMP   // Cellule de Contrôle des Marchés Publics
+  DDCMP  // Direction Départementale de Contrôle
+  DNCMP  // Direction Nationale de Contrôle
+}
+
+enum SourceFinancement {
+  BN     // Budget National
+  BA     // Budget Autonome
+  FE     // Financement Extérieur
+  DON    // Don
+}
+
+model PlanPassation {
+  id              String      @id @default(cuid())
+  annee           Int
+  nomAC           String      // Nom de l'Autorité Contractante
+  version         Int         @default(1)
+  statut          StatutPPM   @default(BROUILLON)
+  dateCreation    DateTime    @default(now())
+  dateTransmission DateTime?
+  dateValidation  DateTime?
+  montantTotal    Decimal?    @db.Decimal(18, 0)
+  nbMarchesFTS    Int         @default(0) // Fournitures, Travaux, Services
+  nbMarchesPI     Int         @default(0) // Prestations Intellectuelles
+  updatedAt       DateTime    @updatedAt
+
+  // Relations
+  lignes          LignePPM[]
+  imports         PtabImport[]
+  arrimages       TableauArrimage[]
+
+  @@unique([annee, version])
+  @@map("plans_passation")
+}
+
+model LignePPM {
+  id                       String            @id @default(cuid())
+  ppmId                    String
+  numero                   Int               // N° séquentiel dans le PPM
+  refN                     String            // Référence unique : F_DSI_116126
+  description              String
+  typeMarche               TypeMarche
+  modePassation            ModePassation
+  methodeSelection         MethodeSelectionPI? // PI uniquement
+  montantEstimatif         Decimal           @db.Decimal(18, 0) // FCFA HT
+  sourceFinancement        SourceFinancement
+  imputationBudgetaire     String
+  organeControle           OrganeControle
+  autorisationEngagement   String?           // "Annuel" ou "Pluriannuel"
+  estCommunautaire         Boolean           @default(false)
+  estFusion                Boolean           @default(false)
+  justificationIA          String?           // Justification par DeepSeek
+
+  // ─── Dates Feuille 1 : FTS (13 dates) ───
+  dateReceptionDossierOC       DateTime?
+  dateAvisNonObjectionOC       DateTime?
+  dateAvisNonObjectionPTF      DateTime?
+  dateBonALancer               DateTime?
+  dateAutorisationLancement    DateTime?
+  datePublicationAvis          DateTime?
+  dateOuverturePlis            DateTime?
+  dateReceptionRapportEval     DateTime?
+  dateAvisOCEvaluation         DateTime?
+  dateAvisOCEvalPTF            DateTime?
+  dateExamenJuridique          DateTime?
+  dateApprobationContrat       DateTime?
+  dateNotificationContrat      DateTime?
+
+  // ─── Dates supplémentaires Feuille 2 : PI (27 dates) ───
+  // AMI
+  dateReceptionAMI_OC          DateTime?
+  dateAvisOC_AMI               DateTime?
+  dateAvisPTF_AMI              DateTime?
+  dateBAL_AMI                  DateTime?
+  dateAutorisationAMI          DateTime?
+  datePublicationAMI           DateTime?
+  dateOuvertureAMI             DateTime?
+  dateRapportAMI_OC            DateTime?
+  dateAvisOC_AMI_Eval          DateTime?
+  dateAvisPTF_AMI_Eval         DateTime?
+  // DP
+  dateReceptionDP_OC           DateTime?
+  dateAvisOC_DP                DateTime?
+  dateAvisPTF_DP               DateTime?
+  dateBAL_DP                   DateTime?
+  dateAutorisationDP           DateTime?
+  dateInvitationSoumission     DateTime?
+  // Offres techniques
+  dateOuvertureOffresTech      DateTime?
+  dateResultatsTech_OC         DateTime?
+  dateAvisOC_Tech              DateTime?
+  dateAvisPTF_Tech             DateTime?
+  // Offres financières
+  dateOuvertureOffresFin       DateTime?
+  dateResultatsFin_OC          DateTime?
+  dateAvisOC_Fin               DateTime?
+  dateAvisPTF_Fin              DateTime?
+  // Signature (PI)
+  dateExamenJuridiquePI        DateTime?
+  dateApprobationPI            DateTime?
+  dateNotificationPI           DateTime?
+
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+
+  // Relations
+  ppm              PlanPassation  @relation(fields: [ppmId], references: [id], onDelete: Cascade)
+  activitesPtab    ActivitePtab[]
+  dao              Dao?
+  marche           Marche?
+
+  @@unique([ppmId, refN])
+  @@map("lignes_ppm")
+}
+
+// ─── Import PTAB ───
+
+model PtabImport {
+  id           String   @id @default(cuid())
+  ppmId        String
+  fichier      String   // Chemin du fichier PTAB uploadé
+  mapping      Json     // Mapping colonnes détecté par DeepSeek
+  dateImport   DateTime @default(now())
+
+  ppm          PlanPassation @relation(fields: [ppmId], references: [id], onDelete: Cascade)
+  activites    ActivitePtab[]
+
+  @@map("ptab_imports")
+}
+
+model ActivitePtab {
+  id                   String   @id @default(cuid())
+  importId             String
+  lignePpmId           String?
+  codeBudgetaire       String
+  description          String
+  imputationBudgetaire String?
+  montant              Decimal  @db.Decimal(18, 0)
+  dateDebut            DateTime?
+  dateFin              DateTime?
+  structureResponsable String?
+  modeExecution        String?
+  estFusionnee         Boolean  @default(false)
+
+  import               PtabImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+  lignePpm             LignePPM?  @relation(fields: [lignePpmId], references: [id])
+
+  @@map("activites_ptab")
+}
+
+// ─── Tableau d'arrimage PPM ↔ PTAB ───
+
+model TableauArrimage {
+  id                   String  @id @default(cuid())
+  ppmId                String
+  codeBudgetairePtab   String
+  descriptionPtab      String
+  imputationPtab       String?
+  montantPtab          Decimal @db.Decimal(18, 0)
+  refPpm               String
+  descriptionPpm       String
+  typeMarche           String
+  modePassation        String
+  montantPpm           Decimal @db.Decimal(18, 0)
+  observation          String? // "fusionné avec...", "marché autonome"
+
+  ppm                  PlanPassation @relation(fields: [ppmId], references: [id], onDelete: Cascade)
+
+  @@map("tableau_arrimage")
+}
+
+// ─── Module 2 : DAO ───
+
+enum StatutDAO {
+  BROUILLON
+  EN_REVUE
+  SOUMIS_OC
+  BAL_OBTENU
+  PUBLIE
+}
+
+model Dao {
+  id                  String    @id @default(cuid())
+  lignePpmId          String    @unique
+  statut              StatutDAO @default(BROUILLON)
+  dpao                Json?     // Données Particulières de l'AO
+  criteresEvaluation  Json?
+  specificationsT     Json?     // Spécifications techniques
+  ccap                Json?     // Clauses administratives particulières
+  montantGarantie     Decimal?  @db.Decimal(18, 0)
+  tauxGarantie        Decimal?  @db.Decimal(5, 2) // 1-3%
+  dateLimiteDepot     DateTime?
+  delaiValiditeOffres Int       @default(90)
+  hashIC              String?   // Hash SHA-256 bloc IC (non modifiable)
+  hashCCAG            String?   // Hash SHA-256 bloc CCAG (non modifiable)
+  checklistARMP       Json?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  lignePpm            LignePPM  @relation(fields: [lignePpmId], references: [id])
+  offres              Offre[]
+
+  @@map("daos")
+}
+
+// ─── Module 3 : Publication ───
+
+model Publication {
+  id          String   @id @default(cuid())
+  daoId       String
+  canal       String   // JORB, PRMP, SITE_WEB, PRESSE
+  datePublication DateTime
+  dateLimite  DateTime
+  contenu     String?
+  createdAt   DateTime @default(now())
+
+  @@map("publications")
+}
+
+// ─── Module 4 : Ouverture ───
+
+model Offre {
+  id              String   @id @default(cuid())
+  daoId           String
+  nomCandidat     String
+  dateReception   DateTime
+  montantOffre    Decimal? @db.Decimal(18, 0)
+  estConforme     Boolean?
+  createdAt       DateTime @default(now())
+
+  dao             Dao      @relation(fields: [daoId], references: [id])
+  evaluations     Evaluation[]
+
+  @@map("offres")
+}
+
+// ─── Module 5 : Évaluation ───
+
+model Evaluation {
+  id              String   @id @default(cuid())
+  offreId         String
+  critere         String
+  note            Decimal? @db.Decimal(5, 2)
+  observation     String?
+  createdAt       DateTime @default(now())
+
+  offre           Offre    @relation(fields: [offreId], references: [id])
+
+  @@map("evaluations")
+}
+
+// ─── Module 6 : Attribution ───
+
+enum StatutMarche {
+  ATTRIBUE
+  STANDSTILL
+  RECOURS
+  SIGNE
+  APPROUVE
+  NOTIFIE
+  EN_COURS
+  ACHEVE
+  RESILIE
+}
+
+// ─── Module 7 : Exécution ───
+
+model Marche {
+  id                String       @id @default(cuid())
+  lignePpmId        String       @unique
+  statut            StatutMarche @default(ATTRIBUE)
+  titulaire         String
+  montantContrat    Decimal      @db.Decimal(18, 0)
+  dateSignature     DateTime?
+  dateApprobation   DateTime?
+  dateNotification  DateTime?
+  dateDebutExec     DateTime?    // Ordre de Service
+  delaiExecution    Int?         // En jours
+  dateFinPrevue     DateTime?
+  cumulPenalites    Decimal      @default(0) @db.Decimal(18, 0)
+  cumulAvenants     Decimal      @default(0) @db.Decimal(18, 0)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  lignePpm          LignePPM     @relation(fields: [lignePpmId], references: [id])
+  penalites         Penalite[]
+  avenants          Avenant[]
+  paiements         Paiement[]
+
+  @@map("marches")
+}
+
+model Penalite {
+  id          String   @id @default(cuid())
+  marcheId    String
+  dateCalcul  DateTime @default(now())
+  joursRetard Int
+  montant     Decimal  @db.Decimal(18, 0)
+
+  marche      Marche   @relation(fields: [marcheId], references: [id])
+
+  @@map("penalites")
+}
+
+model Avenant {
+  id          String   @id @default(cuid())
+  marcheId    String
+  numero      Int
+  objet       String
+  montant     Decimal  @db.Decimal(18, 0)
+  dateAvenant DateTime
+  approuve    Boolean  @default(false)
+
+  marche      Marche   @relation(fields: [marcheId], references: [id])
+
+  @@map("avenants")
+}
+
+model Paiement {
+  id              String   @id @default(cuid())
+  marcheId        String
+  montant         Decimal  @db.Decimal(18, 0)
+  dateDemande     DateTime
+  datePaiement    DateTime?
+  interetsMoratoires Decimal? @db.Decimal(18, 0)
+
+  marche          Marche   @relation(fields: [marcheId], references: [id])
+
+  @@map("paiements")
+}
+
+// ─── Module 8 : Archivage ───
+
+model Archive {
+  id          String   @id @default(cuid())
+  marcheId    String
+  typeDoc     String   // DAO, PV, CONTRAT, AVENANT, RAPPORT...
+  fichier     String   // Chemin du fichier
+  hashSHA256  String   // Intégrité
+  dateArchive DateTime @default(now())
+
+  @@map("archives")
+}
